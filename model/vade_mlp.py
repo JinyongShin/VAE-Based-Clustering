@@ -1,12 +1,11 @@
-#!/usr/bin/env python
 import torch
 import torch.utils.data
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as tr
-from torch.utils.data import DataLoader, Dataset
-from torch.autograd import Variable 
+from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.autograd import Variable
 import torchvision.utils as vutils
 import itertools
 
@@ -15,14 +14,10 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.mixture import GaussianMixture
 
-nc = 1
-ndf = 64
-ngf = 64
-
 class MyModel(nn.Module):
 	def __init__(self,latent_dim,nClusters):
 		super(MyModel,self).__init__()
-		
+
 		self.latent_dim = latent_dim
 		self.nClusters = nClusters
 		self.pi_=nn.Parameter(torch.FloatTensor(self.nClusters,).fill_(1)/self.nClusters,requires_grad=True)
@@ -38,16 +33,24 @@ class MyModel(nn.Module):
 		self.sigmoid = nn.Sigmoid()
 
 		self.encoder = nn.Sequential(
-			nn.Linear(784,512),
+			nn.Linear(784,2000),
 			nn.ReLU(),
-			nn.Linear(512,256),
+			nn.Linear(2000,500),
+			nn.ReLU(),
+			nn.Linear(500,500),
+			nn.ReLU(),
+			nn.Linear(500,256),
 			nn.ReLU(),
 		)
 
 		self.decoder = nn.Sequential(
-			nn.Linear(256,512),
+			nn.Linear(256,500),
 			nn.ReLU(),
-			nn.Linear(512,784),
+			nn.Linear(500,500),
+			nn.ReLU(),
+			nn.Linear(500,2000),
+			nn.ReLU(),
+			nn.Linear(2000,784),
 			nn.Sigmoid(),
 		)
 
@@ -68,25 +71,16 @@ class MyModel(nn.Module):
 		  # eps = Variable(torch.from_numpy(num))
 		return eps.mul(std).add_(mu)
 	
-#	 def reparametrize(self, mu, logvar):
-#		 std = logvar.mul(0.5).exp_()
-#		 if torch.cuda.is_available():
-#			 eps = torch.cuda.FloatTensor(std.size()).normal_()
-#		 else:
-#			 eps = torch.FloatTensor(std.size()).normal_()
-#		 eps = Variable(eps)
-#		 return eps.mul(std).add_(mu)
-	
 	def gaussian_pdf_log(self,x,mu,log_sigma2):
 		return -0.5*(torch.sum(np.log(np.pi*2)+log_sigma2+(x-mu).pow(2)/torch.exp(log_sigma2),1))
-	
+
 	def gaussian_pdfs_log(self,x,mus,log_sigma2s):
 	#def gaussian_pdfs_log(x,mus,log_sigma2s):
 		G=[]
 		for c in range(self.nClusters):
 			G.append(self.gaussian_pdf_log(x,mus[c:c+1,:],log_sigma2s[c:c+1,:]).view(-1,1))
 		return torch.cat(G,1)
-	
+
 	def forward(self, x):
 		# print("x", x.size())
 		mu, logvar = self.encode(x.view(-1,784))
@@ -130,7 +124,7 @@ class MyModel(nn.Module):
 
 		Z=torch.cat(Z,0).detach().cpu().numpy()
 		Y=torch.cat(Y,0).detach().numpy()
-
+		
 		gmm = GaussianMixture(n_components=self.nClusters,covariance_type='diag')
 
 		pre = gmm.fit_predict(Z)
@@ -141,6 +135,18 @@ class MyModel(nn.Module):
 
 		torch.save(self.state_dict(), outdir + '/pretrained.pth')
 
+	def predict(self,x):
+		z_mu, z_sigma2_log = self.encode(x)
+		z = torch.randn_like(z_mu) * torch.exp(z_sigma2_log / 2) + z_mu
+		pi = self.pi_
+		log_sigma2_c = self.log_var_c
+		mu_c = self.mu_c
+		yita_c = torch.exp(torch.log(pi.unsqueeze(0))+self.gaussian_pdfs_log(z,mu_c,log_sigma2_c))
+
+		yita=yita_c.detach().cpu().numpy()
+		#print(yita)
+		return np.argmax(yita,axis=1)
+		
 	def RE(self,recon_x,x):
 		return torch.nn.functional.binary_cross_entropy(recon_x.view(-1,784),x.view(-1,784),size_average=False)
 
